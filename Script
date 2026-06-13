@@ -2285,6 +2285,16 @@ local function hasWordStarting(char)
         end
         return false
 end
+-- 상대방이 이 글자로 시작할 수 있는 단어 총 개수 (두음법칙 변형 포함)
+local function opponentCount(char)
+        local cnt = 0
+        for _, v in ipairs(getDuumVariants(char)) do
+                local list = dictionary[v]
+                if list then cnt = cnt + #list end
+        end
+        return cnt
+end
+
 
 local files = {
         {name = "끄글필수공격단어.txt",  priority = 1},
@@ -2968,10 +2978,36 @@ startBot = function()
                 return selected
         end
 
+        -- 한방: 두음법칙 포함 후보에서 한방점수 가장 높은 단어 선택
         local function findBestWord(startChar)
-                return findByScore(startChar, function(w)
-                        return (wordScore[w] or 0) >= 100000
-                end, 3)
+                local candidates = {}
+                local seenW = {}
+                local function tryList(list)
+                        if not list then return end
+                        for _, word in ipairs(list) do
+                                if isDeleted(word) then continue end
+                                if not seenW[word] and not isUsed(word) and not wasRecent(word) then
+                                        local s = wordScore[word] or 0
+                                        if s >= 100000 then
+                                                seenW[word] = true
+                                                table.insert(candidates, word)
+                                        end
+                                end
+                        end
+                end
+                -- 직접 글자 + 두음법칙 변형 항상 수집
+                tryList(dictionary[startChar])
+                for _, variant in ipairs(getDuumVariants(startChar)) do
+                        if variant ~= startChar then tryList(dictionary[variant]) end
+                end
+                if #candidates == 0 then return nil end
+                -- 한방: 두음 적용 여부와 무관하게 kill 점수 최고값 우선
+                table.sort(candidates, function(a, b)
+                        return (wordScore[a] or 0) > (wordScore[b] or 0)
+                end)
+                local selected = candidates[math.random(1, math.min(3, #candidates))]
+                if selected then addRecent(selected) end
+                return selected
         end
 
 
@@ -2979,40 +3015,44 @@ startBot = function()
 
         -- 노멀
 
+        -- 노멀: 두음법칙 포함 후보에서 상대 응수가 가장 어려운 단어 우선
         local function findNormalWord(startChar)
-                local best = findByScore(startChar, function(w)
-                        local s = wordScore[w] or 0
-                        return s >= 10000 and s < 100000
-                end, 5)
-                if best then return best end
-
-                if maxRoute >= 3 then
-                        local b3 = findByScore(startChar, function(w)
-                                local s = wordScore[w] or 0
-                                return s >= 5000 and s < 10000
-                        end, 5)
-                        if b3 then return b3 end
+                local candidates = {}
+                local seenW = {}
+                local function tryList(list)
+                        if not list then return end
+                        for _, word in ipairs(list) do
+                                if isDeleted(word) then continue end
+                                if not seenW[word] and not isUsed(word) and not wasRecent(word) then
+                                        if (wordScore[word] or 0) < 100000 then  -- 한방단어 제외
+                                                seenW[word] = true
+                                                table.insert(candidates, word)
+                                        end
+                                end
+                        end
                 end
-
-                if maxRoute >= 4 then
-                        local b4 = findByScore(startChar, function(w)
-                                local s = wordScore[w] or 0
-                                return s >= 2000 and s < 5000
-                        end, 5)
-                        if b4 then return b4 end
+                -- 직접 글자 + 두음법칙 변형 항상 수집
+                tryList(dictionary[startChar])
+                for _, variant in ipairs(getDuumVariants(startChar)) do
+                        if variant ~= startChar then tryList(dictionary[variant]) end
                 end
+                if #candidates == 0 then return nil end
 
-                if maxRoute >= 5 then
-                        local b5 = findByScore(startChar, function(w)
-                                local s = wordScore[w] or 0
-                                return s >= 1000 and s < 2000
-                        end, 5)
-                        if b5 then return b5 end
-                end
-
-                return findByScore(startChar, function(w)
-                        return (wordScore[w] or 0) < 10000
-                end, 3)
+                -- 노멀: 두음 적용 여부와 무관하게
+                --   ① wordScore (공격/필수 보너스 포함)
+                --   ② 마지막 글자 상대 응수 수 적을수록 +보너스 (루트 단축·이어가기 어렵게)
+                --      restrictBonus = 50000 / (opponentCount(lastChar) + 1)
+                table.sort(candidates, function(a, b)
+                        local lca = lastChar(a)
+                        local lcb = lastChar(b)
+                        local sa = (wordScore[a] or 0) + math.floor(50000 / (opponentCount(lca) + 1))
+                        local sb = (wordScore[b] or 0) + math.floor(50000 / (opponentCount(lcb) + 1))
+                        return sa > sb
+                end)
+                local topN = math.min(5, #candidates)
+                local selected = candidates[math.random(1, topN)]
+                if selected then addRecent(selected) end
+                return selected
         end
 
 
@@ -3020,6 +3060,7 @@ startBot = function()
 
         -- 긴단어
 
+        -- 긴단어: 두음법칙 포함 후보에서 가장 긴 단어 우선 선택
         local function findLongestWord(startChar)
                 local candidates = {}
                 local seenW = {}
@@ -3035,15 +3076,16 @@ startBot = function()
                         end
                 end
 
+                -- 긴단어: 직접 글자 + 두음법칙 변형 항상 모두 수집
+                -- 두음 적용 시 더 긴 단어가 나오면 그쪽을 선택
                 tryList(dictionary[startChar])
-                if #candidates == 0 then
-                        for _, variant in ipairs(getDuumVariants(startChar)) do
-                                if variant ~= startChar then
-                                        tryList(dictionary[variant])
-                                end
+                for _, variant in ipairs(getDuumVariants(startChar)) do
+                        if variant ~= startChar then
+                                tryList(dictionary[variant])
                         end
                 end
                 if #candidates == 0 then return nil end
+                -- 길이 우선, 같으면 점수 우선
                 table.sort(candidates, function(a, b)
                         local la, lb = utf8.len(a), utf8.len(b)
                         if la ~= lb then return la > lb end
@@ -5000,6 +5042,16 @@ local function hasWordStarting(char)
         end
         return false
 end
+-- 상대방이 이 글자로 시작할 수 있는 단어 총 개수 (두음법칙 변형 포함)
+local function opponentCount(char)
+        local cnt = 0
+        for _, v in ipairs(getDuumVariants(char)) do
+                local list = dictionary[v]
+                if list then cnt = cnt + #list end
+        end
+        return cnt
+end
+
 
 local files = {
         {name = "끄글필수공격단어.txt",  priority = 1},
@@ -5683,10 +5735,36 @@ startBot = function()
                 return selected
         end
 
+        -- 한방: 두음법칙 포함 후보에서 한방점수 가장 높은 단어 선택
         local function findBestWord(startChar)
-                return findByScore(startChar, function(w)
-                        return (wordScore[w] or 0) >= 100000
-                end, 3)
+                local candidates = {}
+                local seenW = {}
+                local function tryList(list)
+                        if not list then return end
+                        for _, word in ipairs(list) do
+                                if isDeleted(word) then continue end
+                                if not seenW[word] and not isUsed(word) and not wasRecent(word) then
+                                        local s = wordScore[word] or 0
+                                        if s >= 100000 then
+                                                seenW[word] = true
+                                                table.insert(candidates, word)
+                                        end
+                                end
+                        end
+                end
+                -- 직접 글자 + 두음법칙 변형 항상 수집
+                tryList(dictionary[startChar])
+                for _, variant in ipairs(getDuumVariants(startChar)) do
+                        if variant ~= startChar then tryList(dictionary[variant]) end
+                end
+                if #candidates == 0 then return nil end
+                -- 한방: 두음 적용 여부와 무관하게 kill 점수 최고값 우선
+                table.sort(candidates, function(a, b)
+                        return (wordScore[a] or 0) > (wordScore[b] or 0)
+                end)
+                local selected = candidates[math.random(1, math.min(3, #candidates))]
+                if selected then addRecent(selected) end
+                return selected
         end
 
 
@@ -5694,40 +5772,44 @@ startBot = function()
 
         -- 노멀
 
+        -- 노멀: 두음법칙 포함 후보에서 상대 응수가 가장 어려운 단어 우선
         local function findNormalWord(startChar)
-                local best = findByScore(startChar, function(w)
-                        local s = wordScore[w] or 0
-                        return s >= 10000 and s < 100000
-                end, 5)
-                if best then return best end
-
-                if maxRoute >= 3 then
-                        local b3 = findByScore(startChar, function(w)
-                                local s = wordScore[w] or 0
-                                return s >= 5000 and s < 10000
-                        end, 5)
-                        if b3 then return b3 end
+                local candidates = {}
+                local seenW = {}
+                local function tryList(list)
+                        if not list then return end
+                        for _, word in ipairs(list) do
+                                if isDeleted(word) then continue end
+                                if not seenW[word] and not isUsed(word) and not wasRecent(word) then
+                                        if (wordScore[word] or 0) < 100000 then  -- 한방단어 제외
+                                                seenW[word] = true
+                                                table.insert(candidates, word)
+                                        end
+                                end
+                        end
                 end
-
-                if maxRoute >= 4 then
-                        local b4 = findByScore(startChar, function(w)
-                                local s = wordScore[w] or 0
-                                return s >= 2000 and s < 5000
-                        end, 5)
-                        if b4 then return b4 end
+                -- 직접 글자 + 두음법칙 변형 항상 수집
+                tryList(dictionary[startChar])
+                for _, variant in ipairs(getDuumVariants(startChar)) do
+                        if variant ~= startChar then tryList(dictionary[variant]) end
                 end
+                if #candidates == 0 then return nil end
 
-                if maxRoute >= 5 then
-                        local b5 = findByScore(startChar, function(w)
-                                local s = wordScore[w] or 0
-                                return s >= 1000 and s < 2000
-                        end, 5)
-                        if b5 then return b5 end
-                end
-
-                return findByScore(startChar, function(w)
-                        return (wordScore[w] or 0) < 10000
-                end, 3)
+                -- 노멀: 두음 적용 여부와 무관하게
+                --   ① wordScore (공격/필수 보너스 포함)
+                --   ② 마지막 글자 상대 응수 수 적을수록 +보너스 (루트 단축·이어가기 어렵게)
+                --      restrictBonus = 50000 / (opponentCount(lastChar) + 1)
+                table.sort(candidates, function(a, b)
+                        local lca = lastChar(a)
+                        local lcb = lastChar(b)
+                        local sa = (wordScore[a] or 0) + math.floor(50000 / (opponentCount(lca) + 1))
+                        local sb = (wordScore[b] or 0) + math.floor(50000 / (opponentCount(lcb) + 1))
+                        return sa > sb
+                end)
+                local topN = math.min(5, #candidates)
+                local selected = candidates[math.random(1, topN)]
+                if selected then addRecent(selected) end
+                return selected
         end
 
 
@@ -5735,6 +5817,7 @@ startBot = function()
 
         -- 긴단어
 
+        -- 긴단어: 두음법칙 포함 후보에서 가장 긴 단어 우선 선택
         local function findLongestWord(startChar)
                 local candidates = {}
                 local seenW = {}
@@ -5750,15 +5833,16 @@ startBot = function()
                         end
                 end
 
+                -- 긴단어: 직접 글자 + 두음법칙 변형 항상 모두 수집
+                -- 두음 적용 시 더 긴 단어가 나오면 그쪽을 선택
                 tryList(dictionary[startChar])
-                if #candidates == 0 then
-                        for _, variant in ipairs(getDuumVariants(startChar)) do
-                                if variant ~= startChar then
-                                        tryList(dictionary[variant])
-                                end
+                for _, variant in ipairs(getDuumVariants(startChar)) do
+                        if variant ~= startChar then
+                                tryList(dictionary[variant])
                         end
                 end
                 if #candidates == 0 then return nil end
+                -- 길이 우선, 같으면 점수 우선
                 table.sort(candidates, function(a, b)
                         local la, lb = utf8.len(a), utf8.len(b)
                         if la ~= lb then return la > lb end
@@ -6204,3 +6288,4 @@ startBot = function()
 end -- startBot
 
 end
+
