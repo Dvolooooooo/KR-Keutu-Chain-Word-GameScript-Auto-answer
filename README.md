@@ -1,1 +1,0 @@
-# KR-Keutu-Chain-Word-GameScript-Auto-answer
